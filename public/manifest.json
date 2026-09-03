@@ -1,0 +1,23 @@
+{
+  "manifestVersion": 1,
+  "id": "newest-first",
+  "name": "Newest First",
+  "author": "jonahweinbaum",
+  "repoUrl": "https://github.com/jonahwei19/remnote-newest-first",
+  "version": {
+    "major": 0,
+    "minor": 2,
+    "patch": 0
+  },
+  "theme": [],
+  "enableOnMobile": true,
+  "unlisted": false,
+  "description": "Practise the cards you just made, first. Never-practised cards are served newest-created-first at the front of your normal queue, graded by RemNote's own scheduler.",
+  "requestNative": false,
+  "requiredScopes": [
+    {
+      "type": "All",
+      "level": "ReadCreateModify"
+    }
+  ]
+}

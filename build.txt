@@ -1,0 +1,1 @@
+webpack 5.109.2 compiled with 3 warnings (bundle-size advisories); PluginZip.zip 611150 bytes, 15 files; built 2026-09-03T01:28:53Z from marketplace-plugin @ 0.2.0
