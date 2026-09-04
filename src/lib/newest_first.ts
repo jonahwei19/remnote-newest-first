@@ -173,6 +173,9 @@ interface NfStats {
   addedOnChange: number;
   /** Cards we served that RemNote reported as answered. */
   completedOurs: number;
+  /** Rem-change events actually delivered. Zero here with edits happening means
+   * the listener key is wrong again ‒ the failure that hid for two weeks. */
+  remChangeEvents: number;
 }
 
 export interface NfHandle {
@@ -229,6 +232,7 @@ export function installNewestFirst(plugin: RNPlugin, log: (line: string) => void
     completed: [],
     addedOnChange: 0,
     completedOurs: 0,
+    remChangeEvents: 0,
   };
 
   const persist = () => {
@@ -392,6 +396,7 @@ export function installNewestFirst(plugin: RNPlugin, log: (line: string) => void
 
   const pendingChanges = new Map<string, ReturnType<typeof setTimeout>>();
   const onRemChanged = (data: any) => {
+    stats.remChangeEvents++;
     const remId = typeof data === 'string' ? data : data?.remId ?? data?._id;
     if (typeof remId !== 'string' || remId.length === 0) return;
     const prior = pendingChanges.get(remId);
