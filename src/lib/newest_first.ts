@@ -45,6 +45,17 @@ const STALE_CHECK_HEAD = 15;
  * rems, so the first build is bounded even on a large, cold knowledge base.
  * Older never-practised cards stay native until they are edited. */
 const INITIAL_BUILD_MAX = 500;
+/**
+ * The first slice of that build, published before the rest is validated.
+ *
+ * RemNote asks for a card during a background preload and the callback cannot
+ * await, so anything not yet in the list is a `null` answer. On a fresh install
+ * the reviewer opened the queue while the first build was still running and saw
+ * "asked 2x, served 0" (RemNote review, 2026-09-03); reproduced here on a
+ * 41k-rem knowledge base as three empty answers. Publishing the newest few
+ * dozen first makes that window a second or two instead of the whole build.
+ */
+const INITIAL_BUILD_FIRST_SLICE = 40;
 /** After one card of a rem is served, its remaining new cards (the other
  * direction, the other clozes) wait this long: you just saw the answer. */
 const SIBLING_HOLD_MS = 10 * 60 * 1000;
@@ -423,9 +434,13 @@ export function installNewestFirst(plugin: RNPlugin, log: (line: string) => void
       if (initial) {
         fresh = fresh.sort((a: any, b: any) => b.createdAt - a.createdAt).slice(0, INITIAL_BUILD_MAX);
       }
+      // On that first build, publish the newest slice before validating the
+      // rest, so the queue has something to serve within a second or two.
+      const firstSlice = initial ? fresh.slice(0, INITIAL_BUILD_FIRST_SLICE) : [];
+      const rest = initial ? fresh.slice(INITIAL_BUILD_FIRST_SLICE) : fresh;
       const additions: QueueCandidate[] = [];
       const validatedWatermarks: number[] = [];
-      await mapLimit(fresh, CONCURRENCY, async (rem: any) => {
+      const validate = async (rem: any) => {
         const cs = await remCardState(rem);
         if (!cs) return; // failed — do NOT advance watermark past this rem
         validatedWatermarks.push(rem.createdAt);
@@ -436,7 +451,19 @@ export function installNewestFirst(plugin: RNPlugin, log: (line: string) => void
           if ((await rem.getEnablePractice()) === false) return;
         } catch {}
         additions.push(candidateFrom(rem, cs));
-      });
+      };
+      if (firstSlice.length > 0) {
+        await mapLimit(firstSlice, CONCURRENCY, validate);
+        // Publish what we have before the rest is validated. The watermark
+        // stays where it is until the whole build finishes, so nothing in
+        // `rest` is skipped if this is interrupted.
+        if (additions.length > 0) {
+          added += insertSorted(additions.splice(0, additions.length));
+          persist();
+          log(`newest-first: first ${added} rem(s) queued, still building`);
+        }
+      }
+      await mapLimit(rest, CONCURRENCY, validate);
 
       // Re-validate the head of the list so entries practiced elsewhere (a
       // phone session, a doc queue) fall out instead of being served again.
@@ -482,7 +509,7 @@ export function installNewestFirst(plugin: RNPlugin, log: (line: string) => void
         // Re-check against the list as it stands NOW: a seed or a change-event
         // add may have landed while this refresh was scanning, and a pop must
         // stay popped.
-        added = insertSorted(additions);
+        added += insertSorted(additions);
       }
       if (initial && validatedWatermarks.length > 0) state.origin = 'initial-build';
       // Only advance watermark past rems whose card state was actually resolved.
