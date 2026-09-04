@@ -1,4 +1,4 @@
-import { declareIndexPlugin, QueueItemType, type ReactRNPlugin, WidgetLocation } from '@remnote/plugin-sdk';
+import { AppEvents, declareIndexPlugin, QueueItemType, type ReactRNPlugin, WidgetLocation } from '@remnote/plugin-sdk';
 import '../style.css';
 import '../index.css';
 import { installNewestFirst } from '../lib/newest_first';
@@ -23,13 +23,26 @@ async function onActivate(plugin: ReactRNPlugin) {
     dimensions: { height: 'auto', width: '100%' },
     queueItemTypeFilter: QueueItemType.Plugin,
   });
+  // "e" on an injected item opens RemNote's editor for the rem in this popup
+  // (the native in-queue editor is a queue type plugins cannot produce).
+  await plugin.app.registerWidget('nf_edit', WidgetLocation.Popup, {
+    dimensions: { height: 'auto', width: '720px' },
+  });
 
+  // The list builds itself on first activation (newest card rems), is kept
+  // current by rem-change events, and is re-checked on entering the queue.
   const nf = installNewestFirst(plugin, (line) => console.log(line));
+  // "b" on an injected item disables it (nf_flashcard.tsx) and tells us to
+  // forget the rem, so its other cards are not served either.
+  plugin.event.addListener(AppEvents.MessageBroadcast, undefined, (data: any) => {
+    const msg = data?.message ?? data;
+    if (msg?.type === 'nf-drop' && typeof msg.remId === 'string') nf.drop(msg.remId);
+  });
 
   await plugin.app.registerCommand({
     id: 'nf-rebuild',
     name: 'Newest First: Rebuild List',
-    description: 'Rescan for never-practised cards (a full scan; can take a minute on a large knowledge base)',
+    description: 'Re-check for never-practised cards. Not needed in normal use: the list builds itself and follows your edits.',
     action: async () => {
       const r = await nf.refresh(true);
       await plugin.app.toast(`Newest First: ${r.size} never-practised rem(s) queued`);
@@ -41,8 +54,9 @@ async function onActivate(plugin: ReactRNPlugin) {
     name: 'Newest First: Status',
     action: async () => {
       const s = nf.snapshot();
+      const how = s.origin === 'none' ? ' (list still building)' : '';
       await plugin.app.toast(
-        `Newest First: ${s.size} queued, asked ${s.stats.calls}x, served ${s.stats.served}. If asked is 0, the queue is not consulting this plugin.`,
+        `Newest First: ${s.size} queued${how}, asked ${s.stats.calls}x, served ${s.stats.served}. If asked is 0, the queue is not consulting this plugin.`,
       );
     },
   });

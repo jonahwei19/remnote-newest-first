@@ -1,6 +1,65 @@
 # SUBMISSION — Newest First
 
-**Nothing here has been submitted.** Submitting is a click only Jonah makes; the
+## 0.3.0 — answers RemNote's rejection (2026-09-03)
+
+Nate at RemNote rejected 0.2.0:
+
+> On a fresh install, the plugin did not serve a newly created card until
+> "Newest First: Rebuild List" was run manually. Before that, its status showed
+> 0 queued, asked 2x, and served 0, but the README does not explain this
+> required setup.
+
+He was right, and the cause was worse than the symptom. Three defects, all fixed:
+
+1. **No list was ever built on a fresh install.** Activation refreshed only when
+   a cache already existed (`watermark > 0`), because a full scan on a cold
+   database was slow enough to starve the app. 0.3.0 builds on first activation
+   from the newest 500 card rems, which is bounded on any knowledge base, and
+   records everything older as considered.
+2. **Every event listener was registered under a key RemNote never emits.** The
+   SDK delivers an event only to listeners registered under the emitter's key
+   (`listeners[eventId].get(msg.listenerKey)`, lib.js). RemNote emits queue
+   events and GlobalRemChanged with `void 0` (45827.js:5715, 33576.js:7934,
+   FullAppBootstrap~3.js:9852); this plugin used a name string. So the list
+   never refreshed on entering the queue and answered cards were never removed.
+   Proven in a headless guest instance: `completed: []` after a full session,
+   then `completedOurs: 5` after the fix. Pinned by tests.
+3. **A card served but never displayed was lost permanently.** RemNote asks
+   during a background preload and parks the answer as `pendingPluginCard`
+   (33576.js:1355); if the session ends first it is discarded. The plugin
+   removed it from the list on serve, so it was never practised and never came
+   back. Now the entry stays until RemNote reports the card answered.
+
+Also in 0.3.0:
+- **Cloze cards are served and drawn correctly** (they were listed but skipped).
+  The question hides that cloze's span behind its hint or `[...]`; the answer
+  reveals it. A cloze with no inline span (image occlusion) is still never
+  served, so it cannot leak an answer.
+- **A rem with several new cards serves them one at a time**, ten minutes apart.
+- **`e` and `b` work on served cards**: `e` opens RemNote's editor for the rem in
+  a popup, `b` disables the card the way RemNote's own `b` does. Keys are stolen
+  only while a plugin card is on screen, under the plugin's own id, which is the
+  key StealKeyEvent is emitted with (FullAppBootstrap~2.js:31023, :80056).
+- README rewritten: the "Nothing to set up" section is the direct answer to the
+  rejection.
+
+**Known and documented, not a defect:** the first card of a session is always
+RemNote's own. `preloadInner` returns early when `mode === "critical"`, which is
+the load that produces the first card, so no plugin is asked for it.
+
+### Resubmission steps (Jonah)
+1. `marketplace-plugin/PluginZip.zip` is built and `npx remnote-plugin validate`
+   passes. Version 0.3.0.
+2. Push the source to the public repo: `bash marketplace-plugin/publish-repo.sh`.
+3. remnote.com/plugins → Build → upload the zip.
+4. Reply to Nate's email saying what changed (points 1-3 above); he asked for the
+   fresh-install path to be verified end to end, and it now is.
+
+---
+
+## Earlier history (0.2.0)
+
+**SUBMITTED 2026-09-02 (PT) via the in-app Build tab; RemNote confirmed "uploaded successfully, wait for approval". Public repo: https://github.com/jonahwei19/remnote-newest-first.** (Original note follows.) Nothing here had been submitted. Submitting is a click only Jonah makes; the
 overnight rules forbid any outbound action. This file is the package plus the
 exact steps.
 

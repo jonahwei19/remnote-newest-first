@@ -1,17 +1,46 @@
 import {
+  AppEvents,
   RichText,
   WidgetLocation,
   renderWidget,
+  useAPIEventListener,
   usePlugin,
   useRunAsync,
   useTrackerPlugin,
 } from '@remnote/plugin-sdk';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { disableServedCard } from '../lib/nf_actions';
 import { Renderable, pickRenderable } from '../lib/nf_render';
 import '../style.css';
 import '../index.css';
 
 const STORAGE_KEY = 'rb-nf-cache-v1';
+/**
+ * Keys RemNote's queue binds natively but that are dead on a plugin item,
+ * because the plugin item base class has empty edit/disable hooks
+ * (33576.js:8199): "e" = Edit Flashcard Now (QueueEditNow), "b" =
+ * Enable/Disable Flashcard (QueuePracticeCurrentDirection). Stolen only while
+ * this widget is mounted, i.e. only while one of OUR items is up; every native
+ * card keeps its native keys. Released while the edit popup is open so they
+ * can be typed there.
+ */
+const STOLEN_KEYS = ['e', 'b'];
+
+/**
+ * The plugin's own id, which is the listener key RemNote emits StealKeyEvent
+ * under: `stealKeys(pluginHost.pluginId, keys)` (FullAppBootstrap~2.js:31023)
+ * and `dispatchEvent(StealKeyEvent, thatId, {key})` (:80056). A listener
+ * registered under any other key never hears the keystroke. Read from the
+ * widget iframe's own URL so the same file works in this plugin and in the
+ * marketplace build, whose id differs.
+ */
+function pluginId(): string | undefined {
+  try {
+    return new URLSearchParams(window.location.search).get('pluginId') ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 class NfErrorBoundary extends React.Component<
   { plugin: any; children: React.ReactNode },
@@ -102,7 +131,47 @@ function NewestFirstCard() {
     [],
   );
   const remId = ctx?.remId;
+  const cardId = (ctx as any)?.cardId as string | undefined;
   const showAnswer = revealed || ctx?.revealed === true;
+
+  // "e" / "b" on our item (see STOLEN_KEYS).
+  const editing = useRef(false);
+  useEffect(() => {
+    if (!remId) return;
+    void plugin.app.stealKeys(STOLEN_KEYS).catch(() => {});
+    return () => {
+      void plugin.app.releaseKeys(STOLEN_KEYS).catch(() => {});
+    };
+  }, [plugin, remId]);
+  const onStolenKey = useCallback(
+    async (data: any) => {
+      const key = String(data?.key ?? data?.keyId ?? '').toLowerCase();
+      if (!remId || editing.current) return;
+      if (key === 'e') {
+        editing.current = true;
+        await plugin.app.releaseKeys(STOLEN_KEYS).catch(() => {});
+        await plugin.widget.openPopup('nf_edit', { remId, cardId });
+        return;
+      }
+      if (key === 'b') {
+        const r = await disableServedCard(plugin, remId, cardId);
+        await plugin.app.toast(r.done ? `Newest first: ${r.what}` : `Newest first: could not disable (${r.why})`);
+        if (r.done) {
+          void plugin.messaging.broadcast({ type: 'nf-drop', remId }).catch(() => {});
+          await plugin.queue.removeCurrentCardFromQueue(true);
+        }
+      }
+    },
+    [plugin, remId, cardId],
+  );
+  useAPIEventListener(AppEvents.StealKeyEvent, pluginId(), (data: any) => void onStolenKey(data));
+  useAPIEventListener(AppEvents.MessageBroadcast, undefined, (data: any) => {
+    const msg = data?.message ?? data;
+    if (msg?.type === 'nf-edit-closed' && editing.current) {
+      editing.current = false;
+      if (remId) void plugin.app.stealKeys(STOLEN_KEYS).catch(() => {});
+    }
+  });
 
   // Native reveal (space bar / the shell's own control) is tracked by the
   // queue, not pushed to widgets; poll it so the body flips with the shell.
@@ -120,16 +189,32 @@ function NewestFirstCard() {
     };
   }, [plugin, revealed]);
 
+  // Why a card could not be drawn, so a blank card is diagnosable from the
+  // screen instead of only from a screenshot. Guest lab 2026-09-04.
+  const [why, setWhy] = useState<string | null>(null);
+
   const shown = useRunAsync(async (): Promise<Renderable | null | undefined> => {
     if (!remId) return undefined;
     try {
       const rem = await plugin.rem.findOne(remId);
-      if (!rem) return null;
+      if (!rem) {
+        setWhy(`rem ${remId} not found`);
+        return null;
+      }
       const cards = (await rem.getCards()) ?? [];
       const withTypes = await Promise.all(
         (cards as any[]).map(async (c) => ({ _id: c._id, type: c.type ?? (await c.getType?.()) })),
       );
-      const result = pickRenderable(rem as any, withTypes);
+      // Render the card RemNote is showing (the served cardId), not merely the
+      // first card of the rem: a rem may have both directions, or several clozes.
+      const result = pickRenderable(rem as any, withTypes, cardId);
+      if (!result) {
+        setWhy(
+          withTypes.length === 0
+            ? 'this rem has no cards'
+            : `no drawable card here (${withTypes.map((c) => (typeof c.type === 'string' ? c.type : 'cloze')).join(', ')})`,
+        );
+      }
       if (result) {
         const parts: string[] = [];
         let cur: any = rem;
@@ -148,17 +233,22 @@ function NewestFirstCard() {
         result.breadcrumb = parts.join(' › ');
       }
       return result;
-    } catch {
+    } catch (err) {
+      setWhy(err instanceof Error ? err.message : String(err));
       return null;
     }
-  }, [remId]);
+  }, [remId, cardId]);
 
   if (!remId) return <div className="rb-nf-card">Newest first: no rem in widget context.</div>;
   if (shown === undefined) return <div className="rb-nf-card">Loading…</div>;
   if (shown === null) {
     return (
       <div className="rb-nf-card">
-        Newest first: nothing renderable for this rem. Press a grade button to move on.
+        <div className="rb-nf-card__badge">newest first</div>
+        <div className="rb-nf-card__question">
+          This card could not be drawn here: {why ?? 'unknown reason'}. Skip it, or grade it below to
+          put it back on the normal schedule.
+        </div>
         <div className="rb-nf-card__buttons">
           <button onClick={() => void plugin.queue.removeCurrentCardFromQueue(true)}>Skip</button>
         </div>
@@ -172,7 +262,7 @@ function NewestFirstCard() {
         <div className="rb-nf-card__breadcrumb">{shown.breadcrumb}</div>
       )}
       <div className="rb-nf-card__badge">
-        newest first{shown.dir === 'backward' ? ' · backward' : ''}
+        newest first{shown.dir === 'backward' ? ' · backward' : shown.dir === 'cloze' ? ' · cloze' : ''}
       </div>
       <div className="rb-nf-card__question">
         <RichText text={(shown.front ?? []) as any} width="100%" />
@@ -183,6 +273,11 @@ function NewestFirstCard() {
           <div className="rb-nf-card__answer">
             <RichText text={(shown.back ?? []) as any} width="100%" />
           </div>
+          {Array.isArray(shown.extra) && shown.extra.length > 0 && (
+            <div className="rb-nf-card__extra">
+              <RichText text={shown.extra as any} width="100%" />
+            </div>
+          )}
         </>
       ) : (
         <button
